@@ -166,6 +166,17 @@ export default class AimpRemote extends InstanceBase {
 		if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null }
 	}
 
+	/** Список всех зарегистрированных feedback-ключей */
+	_allFeedbackIds() {
+		return [
+			'is_playing', 'is_paused', 'is_stopped',
+			'is_muted',
+			'volume_above',
+			'focus_playlist_is', 'focus_track_is',
+			'playing_playlist_is', 'playing_track_is',
+		]
+	}
+
 	async _poll() {
 		if (!this.config?.host) return
 
@@ -220,8 +231,9 @@ export default class AimpRemote extends InstanceBase {
 				this.state.focusPlaylistName = fp.name ?? ''
 				if (newFocusPlId) {
 					this._ensureTracksLoaded(newFocusPlId).then(() => {
+						this.setActionDefinitions(this._buildActions())
 						this._updateVariables()
-						this.checkFeedbacks()
+						this.checkFeedbacks(...this._allFeedbackIds())
 					})
 				}
 			} else {
@@ -254,7 +266,7 @@ export default class AimpRemote extends InstanceBase {
 		}
 
 		this._updateVariables()
-		this.checkFeedbacks()
+		this.checkFeedbacks(...this._allFeedbackIds())
 	}
 
 	_playlistNameById(id) {
@@ -675,7 +687,10 @@ export default class AimpRemote extends InstanceBase {
 				},
 			},
 
-			// Вариант с выбором трека через dropdown (используется кэш треков)
+			// Вариант с выбором трека через dropdown (используется кэш треков).
+			// Для каждого плейлиста создаётся свой dropdown треков, видимый только
+			// когда выбран соответствующий плейлист (isVisibleExpression).
+			// Активный trackId берётся из поля track_<playlistId>.
 			track_action_browse: {
 				name: '🎵 Track: Play or Focus (browse list)',
 				options: [
@@ -685,14 +700,20 @@ export default class AimpRemote extends InstanceBase {
 						label: 'Playlist',
 						choices: plChoices,
 						default: defaultPlId,
+						disableAutoExpression: true,
 					},
-					{
-						type: 'dropdown',
-						id: 'trackId',
-						label: 'Track',
-						choices: defaultTrackChoices,
-						default: defaultTrackChoices[0]?.id ?? '0',
-					},
+					// Один dropdown треков на каждый плейлист
+					...plChoices.map((pl) => {
+						const tracks = this._trackChoicesFor(pl.id)
+						return {
+							type: 'dropdown',
+							id: `track_${pl.id}`,
+							label: `Track (${pl.label})`,
+							choices: tracks,
+							default: tracks[0]?.id ?? '0',
+							isVisibleExpression: `$(options:playlistId) == '${pl.id}'`,
+						}
+					}),
 					{
 						type: 'dropdown',
 						id: 'action',
@@ -705,12 +726,16 @@ export default class AimpRemote extends InstanceBase {
 					},
 				],
 				subscribe: async (action) => {
-					const id = action.options.playlistId
-					if (id !== '' && id != null) await this._ensureTracksLoaded(id)
+					// Подгружаем треки для всех плейлистов при первом показе action,
+					// затем обновляем definitions чтобы dropdown-ы получили актуальные choices.
+					await Promise.all(plChoices.map(pl => this._ensureTracksLoaded(pl.id)))
+					this.setActionDefinitions(this._buildActions())
 				},
 				callback: async (action) => {
-					const { playlistId, trackId, action: act } = action.options
+					const { playlistId, action: act } = action.options
 					if (playlistId === '' || playlistId == null) return
+					// Берём trackId из поля, соответствующего выбранному плейлисту
+					const trackId = action.options[`track_${playlistId}`] ?? '0'
 					if (act === 'play') {
 						await this._request('POST', `/playlists/${playlistId}/tracks/${trackId}/play`)
 					} else {
