@@ -25,6 +25,7 @@ export default class AimpRemote extends InstanceBase {
 		this.tracksCache = {}     // { [playlistId]: [{id, label}] }
 		this._pollTimer = null
 		this._connectionOk = false
+		this._bootstrapping = false
 	}
 
 	// ── Config ───────────────────────────────────
@@ -42,7 +43,9 @@ export default class AimpRemote extends InstanceBase {
 		this.updateStatus(InstanceStatus.Connecting)
 		this._registerVariables()
 		this._registerFeedbacks()
-		await this._bootstrap()
+		// Запускаем bootstrap в фоне, чтобы init() завершился мгновенно
+		// и Companion не убил процесс по таймауту при недоступном хосте.
+		this._bootstrap()
 	}
 
 	async configUpdated(config) {
@@ -50,7 +53,8 @@ export default class AimpRemote extends InstanceBase {
 		this._stopPolling()
 		this.tracksCache = {}
 		this.playlistChoices = []
-		await this._bootstrap()
+		// Аналогично — не блокируем configUpdated
+		this._bootstrap()
 	}
 
 	async destroy() {
@@ -60,17 +64,29 @@ export default class AimpRemote extends InstanceBase {
 	// ── Bootstrap ────────────────────────────────
 
 	async _bootstrap() {
-		const ok = await this._loadPlaylists()
-		if (ok) {
-			this.updateStatus(InstanceStatus.Ok)
-			this._connectionOk = true
-		} else {
+		if (this._bootstrapping) return
+		this._bootstrapping = true
+		try {
+			const ok = await this._loadPlaylists()
+			if (ok) {
+				this.updateStatus(InstanceStatus.Ok)
+				this._connectionOk = true
+			} else {
+				this.updateStatus(InstanceStatus.ConnectionFailure)
+				this._connectionOk = false
+			}
+			this.setActionDefinitions(this._buildActions())
+			// Запускаем первый poll сразу, не дожидаясь интервала
+			this._poll()
+			this._startPolling()
+		} catch (err) {
+			this.log('error', `Bootstrap error: ${err.message}`)
 			this.updateStatus(InstanceStatus.ConnectionFailure)
 			this._connectionOk = false
+			this._startPolling()
+		} finally {
+			this._bootstrapping = false
 		}
-		this.setActionDefinitions(this._buildActions())
-		this._startPolling()
-		await this._poll()
 	}
 
 	// ── HTTP ─────────────────────────────────────
@@ -179,7 +195,18 @@ export default class AimpRemote extends InstanceBase {
 
 	async _poll() {
 		if (!this.config?.host) return
+		try {
+			await this._pollInner()
+		} catch (err) {
+			this.log('error', `Poll error: ${err.message}`)
+			if (this._connectionOk) {
+				this._connectionOk = false
+				this.updateStatus(InstanceStatus.ConnectionFailure)
+			}
+		}
+	}
 
+	async _pollInner() {
 		// Запрашиваем статус и плейлисты параллельно
 		// GET /api/player/status уже содержит focus_playlist и focus_track,
 		// поэтому отдельный GET /api/focus не нужен (но оставим на случай расхождений)
@@ -234,6 +261,8 @@ export default class AimpRemote extends InstanceBase {
 						this.setActionDefinitions(this._buildActions())
 						this._updateVariables()
 						this.checkFeedbacks(...this._allFeedbackIds())
+					}).catch((err) => {
+						this.log('warn', `Failed to load tracks for playlist ${newFocusPlId}: ${err.message}`)
 					})
 				}
 			} else {
