@@ -71,6 +71,10 @@ export default class AimpRemote extends InstanceBase {
 			if (ok) {
 				this.updateStatus(InstanceStatus.Ok)
 				this._connectionOk = true
+				// Загружаем треки для всех плейлистов сразу при старте
+				await Promise.all(
+					this.playlistChoices.map(pl => this._ensureTracksLoaded(pl.id))
+				)
 			} else {
 				this.updateStatus(InstanceStatus.ConnectionFailure)
 				this._connectionOk = false
@@ -220,6 +224,11 @@ export default class AimpRemote extends InstanceBase {
 			if (this._connectionOk) {
 				this._connectionOk = false
 				this.updateStatus(InstanceStatus.ConnectionFailure)
+				// Сбрасываем кэш треков и id плейлистов, чтобы при реконнекте
+				// (возможно к другому AIMP) всё перезагрузилось заново,
+				// даже если id плейлистов совпадут.
+				this.tracksCache = {}
+				this.state._playlistIds = ''
 			}
 			return
 		}
@@ -284,13 +293,21 @@ export default class AimpRemote extends InstanceBase {
 			if (newIds !== this.state._playlistIds) {
 				this.state._playlistIds = newIds
 				this.playlistChoices    = plList.map(p => ({ id: p.id, label: p.name }))
-				// Удаляем треки удалённых плейлистов из кэша
-				const validIds = new Set(plList.map(p => String(p.id)))
-				for (const k of Object.keys(this.tracksCache)) {
-					if (!validIds.has(k)) delete this.tracksCache[k]
-				}
+				// Полностью сбрасываем кэш треков — плейлисты изменились
+				// (мог смениться AIMP-клиент, либо плейлисты перезагружены)
+				this.tracksCache = {}
+				// Сразу обновляем definitions (пока с loading…)
 				this.setActionDefinitions(this._buildActions())
 				this._registerFeedbacks()
+				// Загружаем треки для всех плейлистов в фоне,
+				// затем обновляем definitions с реальными данными
+				Promise.all(plList.map(p => this._ensureTracksLoaded(p.id)))
+					.then(() => {
+						this.setActionDefinitions(this._buildActions())
+					})
+					.catch((err) => {
+						this.log('warn', `Failed to preload tracks: ${err.message}`)
+					})
 			}
 		}
 
@@ -754,12 +771,6 @@ export default class AimpRemote extends InstanceBase {
 						default: 'play',
 					},
 				],
-				subscribe: async (action) => {
-					// Подгружаем треки для всех плейлистов при первом показе action,
-					// затем обновляем definitions чтобы dropdown-ы получили актуальные choices.
-					await Promise.all(plChoices.map(pl => this._ensureTracksLoaded(pl.id)))
-					this.setActionDefinitions(this._buildActions())
-				},
 				callback: async (action) => {
 					const { playlistId, action: act } = action.options
 					if (playlistId === '' || playlistId == null) return
