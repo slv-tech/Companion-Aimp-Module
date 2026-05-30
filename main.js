@@ -36,6 +36,7 @@ export default class AimpRemote extends InstanceBase {
 		this._bootstrapping = false
 		this._pollCount = 0
 		this._tracksRefreshing = false
+		this._browseActivePlaylist = null  // последний выбранный плейлист в browse-action
 	}
 
 	// ── Config ───────────────────────────────────
@@ -279,7 +280,9 @@ export default class AimpRemote extends InstanceBase {
 
 	/** Возвращает choices треков для плейлиста (синхронно, использует кэш) */
 	_trackChoicesFor(aimpId) {
-		return this.tracksCache[String(aimpId)] ?? [{ id: '0', label: '(loading…)' }]
+		const cached = this.tracksCache[String(aimpId)]
+		if (cached && cached.length > 0) return cached
+		return [{ id: '__loading__', label: '(loading\u2026)' }]
 	}
 
 	// ── Polling ──────────────────────────────────
@@ -365,8 +368,8 @@ export default class AimpRemote extends InstanceBase {
 
 		// ── Next track ──────────────────────────
 		const nt = status.next_track
-		this.state.nextTrackTitle  = nt != null ? (nt.title  ?? '') : ''
-		this.state.nextTrackArtist = nt != null ? (nt.artist ?? '') : ''
+		this.state.nextTrackTitle  = this.state.playerState === 'stopped' ? 'STOPPED' : (nt?.title ?? '')
+		this.state.nextTrackArtist = this.state.playerState === 'stopped' ? '' : (nt?.artist ?? '')
 
 		// ── Focus state ───────────────────────────
 		const fp = status.focus_playlist
@@ -1227,29 +1230,37 @@ export default class AimpRemote extends InstanceBase {
 		}
 
 		// Track Browse — выбор трека из плейлиста через browse-dropdown
-		presets['track_browse'] = {
-			type: 'simple',
-			name: 'Track: Browse & Play',
-			style: {
-				text: 'TRACK',
-				size: '18',
-				color: combineRgb(255, 255, 255),
-				bgcolor: combineRgb(80, 40, 80),
-			},
-			steps: [
-				{
-					down: [
-						{
-							actionId: 'track_action_browse',
-							options: {
-								action: 'play',
-							},
-						},
-					],
-					up: [],
+		{
+			const firstPl = playlists[0]
+			const firstPlTracks = firstPl ? (this.tracksCache[String(firstPl.id)] || []) : []
+			const firstTrackId = firstPlTracks.length > 0 ? firstPlTracks[0].id : ''
+
+			presets['track_browse'] = {
+				type: 'simple',
+				name: 'Track: Browse & Play',
+				style: {
+					text: 'TRACK',
+					size: '18',
+					color: combineRgb(255, 255, 255),
+					bgcolor: combineRgb(80, 40, 80),
 				},
-			],
-			feedbacks: [],
+				steps: [
+					{
+						down: [
+							{
+								actionId: 'track_action_browse',
+								options: {
+									playlistId: firstPl?.id ?? '',
+									trackId: firstTrackId,
+									action: 'play',
+								},
+							},
+						],
+						up: [],
+					},
+				],
+				feedbacks: [],
+			}
 		}
 
 		// Focus Previous Playlist
@@ -1698,71 +1709,84 @@ export default class AimpRemote extends InstanceBase {
 			},
 
 			// Вариант с выбором трека через dropdown (browse).
-			// Для каждого плейлиста создаётся свой dropdown треков, видимый только
-			// когда выбран соответствующий плейлист (isVisibleExpression).
+			// Два обычных dropdown'а: плейлист + трек (без isVisibleExpression).
+			// Dropdown трека показывает треки текущего выбранного плейлиста.
+			// При смене плейлиста subscribe перестраивает actions → choices обновляются.
 			track_action_browse: {
 				name: '🎵 Track: Play or Focus (browse list)',
-				options: [
-					{
-						type: 'dropdown',
-						id: 'playlistId',
-						label: 'Playlist',
-						choices: plChoices,
-						default: defaultPlId,
-						disableAutoExpression: true,
-					},
-					...plChoices.map((pl) => {
-						const tracks = this._trackChoicesFor(pl.id)
-						return {
+				options: (() => {
+					// Берём треки для последнего выбранного или default плейлиста
+					const activePlId = this._browseActivePlaylist || defaultPlId
+					const trackChoices = this._trackChoicesFor(activePlId)
+					return [
+						{
 							type: 'dropdown',
-							id: `track_${pl.id}`,
-							label: `Track (${pl.label})`,
-							choices: tracks,
-							default: tracks[0]?.id ?? '0',
-							isVisibleExpression: `$(options:playlistId) == '${pl.id}'`,
+							id: 'playlistId',
+							label: 'Playlist',
+							choices: plChoices,
+							default: defaultPlId,
+						},
+						{
+							type: 'dropdown',
+							id: 'trackId',
+							label: 'Track',
+							choices: trackChoices,
+							default: trackChoices[0]?.id ?? '',
 							allowCustom: true,
 							minChoicesForSearch: 5,
-						}
-					}),
-					{
-						type: 'dropdown',
-						id: 'action',
-						label: 'Action',
-						choices: [
-							{ id: 'play',   label: '▶ Play track' },
-							{ id: 'select', label: '☑ Set focus (select)' },
-						],
-						default: 'play',
-					},
-				],
+						},
+						{
+							type: 'dropdown',
+							id: 'action',
+							label: 'Action',
+							choices: [
+								{ id: 'play',   label: '▶ Play track' },
+								{ id: 'select', label: '☑ Set focus (select)' },
+							],
+							default: 'play',
+						},
+					]
+				})(),
+				optionsToMonitorForSubscribe: ['playlistId'],
+				subscribe: async (action) => {
+					const plId = action.options.playlistId
+					if (!plId) return
+					// Запоминаем выбранный плейлист, подгружаем треки, обновляем choices
+					this._browseActivePlaylist = plId
+					await this._ensureTracksLoaded(plId)
+					this.setActionDefinitions(this._buildActions())
+				},
 				callback: async (action) => {
-					const { playlistId, action: act } = action.options
+					const { playlistId, trackId, action: act } = action.options
 					if (!playlistId) {
 						this.log('warn', `track_action_browse: playlistId is empty`)
 						return
 					}
-					const idx = this._playlistIndex(playlistId)
-					if (idx == null) {
+					const plIdx = this._playlistIndex(playlistId)
+					if (plIdx == null) {
 						this.log('warn', `track_action_browse: unknown playlist ${playlistId}`)
 						return
 					}
-					const trackField = `track_${playlistId}`
-					const trackFilePath = action.options[trackField]
-					if (trackFilePath == null || trackFilePath === '') {
-						this.log('warn', `track_action_browse: track not found in field "${trackField}"`)
+					let filePath = trackId
+					// Fallback: если трек не выбран — берём первый из кэша
+					if (!filePath || filePath === '__loading__') {
+						const tracks = this._trackChoicesFor(playlistId)
+						filePath = tracks[0]?.id
+					}
+					if (!filePath || filePath === '__loading__') {
+						this.log('warn', `track_action_browse: no track selected`)
 						return
 					}
-					// Конвертируем file_path → порядковый index для API
-					const trackApiIdx = this._trackIndex(playlistId, trackFilePath)
+					const trackApiIdx = this._trackIndex(playlistId, filePath)
 					if (trackApiIdx == null) {
-						this.log('warn', `track_action_browse: cannot resolve track index for "${trackFilePath}"`)
+						this.log('warn', `track_action_browse: cannot resolve track index for "${filePath}"`)
 						return
 					}
-					this.log('debug', `track_action_browse: playlist=${playlistId} (plIdx=${idx}), track=${trackApiIdx}, action=${act}`)
+					this.log('debug', `track_action_browse: playlist=${playlistId} (plIdx=${plIdx}), track=${trackApiIdx}, action=${act}`)
 					if (act === 'play') {
-						await this._request('POST', `/playlists/${idx}/tracks/${trackApiIdx}/play`)
+						await this._request('POST', `/playlists/${plIdx}/tracks/${trackApiIdx}/play`)
 					} else {
-						await this._request('POST', `/playlists/${idx}/tracks/${trackApiIdx}/select`)
+						await this._request('POST', `/playlists/${plIdx}/tracks/${trackApiIdx}/select`)
 					}
 				},
 			},
