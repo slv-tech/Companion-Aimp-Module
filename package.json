@@ -2,18 +2,34 @@
   "name": "companion-module-aimp-remote",
   "version": "0.5.1",
   "type": "module",
-  "main": "main.js",
+  "main": "src/main.js",
   "manufacturer": "AIMP",
-  "product": ["AIMP Remote Control"],
+  "product": [
+    "AIMP Remote Control"
+  ],
   "shortname": "aimp-remote",
   "scripts": {
+    "format": "prettier -w .",
+    "package": "companion-module-build",
     "build": "companion-module-build",
     "build:dev": "companion-module-build --dev"
   },
-  "devDependencies": {
-    "@companion-module/tools": "^3.0.1"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/slv-tech/Companion-Aimp-Module.git"
+  },
+  "engines": {
+    "node": "^22.20",
+    "yarn": "^4"
   },
   "dependencies": {
-    "@companion-module/base": "^2.0.4"
-  }
+    "@companion-module/base": "~2.0.4"
+  },
+  "devDependencies": {
+    "@companion-module/tools": "^3.0.1",
+    "prettier": "^3.8.3"
+  },
+  "prettier": "@companion-module/tools/.prettierrc.json",
+  "packageManager": "yarn@4.12.0"
 }
