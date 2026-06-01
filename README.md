@@ -11,8 +11,8 @@ A Bitfocus Companion module for remote control of the AIMP music player. The mod
 ### Build
 
 ```
-npm install
-npm run build
+yarn install
+yarn build
 ```
 
 ### Setup
@@ -28,8 +28,8 @@ Install `aimp-remote-1.0.0` in Companion via the modules menu. Enter the IP addr
 ### Сборка
 
 ```
-npm install
-npm run build
+yarn install
+yarn build
 ```
 
 ### Запуск
